@@ -56,6 +56,7 @@ static const char   mName[] = "LPAPlayer";
 
 #define PCM_FORMAT 2
 #define NUM_FDS 2
+#define LPA_BUFFER_TIME 1500000
 namespace android {
 int LPAPlayer::objectsAlive = 0;
 

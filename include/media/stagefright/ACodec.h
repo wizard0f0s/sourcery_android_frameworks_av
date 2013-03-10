@@ -91,6 +91,9 @@ private:
     struct ExecutingToIdleState;
     struct IdleToLoadedState;
     struct FlushingState;
+#ifdef QCOM_HARDWARE
+    struct FlushingOutputState;
+#endif
 
     enum {
         kWhatSetup                   = 'setu',
@@ -152,6 +155,9 @@ private:
     sp<ExecutingToIdleState> mExecutingToIdleState;
     sp<IdleToLoadedState> mIdleToLoadedState;
     sp<FlushingState> mFlushingState;
+#ifdef QCOM_HARDWARE
+    sp<FlushingOutputState> mFlushingOutputState;
+#endif
     sp<SkipCutBuffer> mSkipCutBuffer;
 
     AString mComponentName;
@@ -184,6 +190,7 @@ private:
     bool mChannelMaskPresent;
     int32_t mChannelMask;
 
+    status_t setCyclicIntraMacroblockRefresh(const sp<AMessage> &msg, int32_t mode);
     status_t allocateBuffersOnPort(OMX_U32 portIndex);
     status_t freeBuffersOnPort(OMX_U32 portIndex);
     status_t freeBuffer(OMX_U32 portIndex, size_t i);

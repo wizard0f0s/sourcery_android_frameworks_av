@@ -68,6 +68,8 @@
 
 #define USE_SURFACE_ALLOC 1
 #define FRAME_DROP_FREQ 0
+#define LPA_MIN_DURATION_USEC_ALLOWED 30000000
+#define LPA_MIN_DURATION_USEC_DEFAULT 60000000
 
 namespace android {
 
@@ -228,7 +230,7 @@ AwesomePlayer::AwesomePlayer()
     mAudioStatusEventPending = false;
 
     reset();
-#ifdef QCOM_ENHANCED_AUDIO
+#if defined (QCOM_ENHANCED_AUDIO) || defined (USE_TUNNEL_MODE)
     mIsTunnelAudio = false;
 #endif
 }
@@ -240,7 +242,7 @@ AwesomePlayer::~AwesomePlayer() {
 
     reset();
 
-#ifdef QCOM_ENHANCED_AUDIO
+#if defined (QCOM_ENHANCED_AUDIO) || defined (USE_TUNNEL_MODE)
     // Disable Tunnel Mode Audio
     if (mIsTunnelAudio) {
         if(mTunnelAliveAP > 0) {
@@ -1018,7 +1020,7 @@ status_t AwesomePlayer::play_l() {
             // We don't want to post an error notification at this point,
             // the error returned from MediaPlayer::start() will suffice.
             bool sendErrorNotification = false;
-#ifdef QCOM_ENHANCED_AUDIO
+#if defined (QCOM_ENHANCED_AUDIO) || defined (IS_TUNNEL_MODE)
             if(mIsTunnelAudio) {
                 // For tunnel Audio error has to be posted to the client
                 sendErrorNotification = true;
@@ -1499,7 +1501,7 @@ status_t AwesomePlayer::initAudioDecoder() {
     meta->findInt32( kKeyChannelCount, &nchannels );
     ALOGV("nchannels %d;LPA will be skipped if nchannels is > 2 or nchannels == 0",
            nchannels);
-
+#endif
 #ifdef USE_TUNNEL_MODE
     char value[PROPERTY_VALUE_MAX];
     char tunnelDecode[128];
@@ -1531,7 +1533,6 @@ status_t AwesomePlayer::initAudioDecoder() {
     }
     else
        ALOGD("Normal Audio Playback");
-#endif
     if (!strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_RAW) ||
              (mIsTunnelAudio && (mTunnelAliveAP == 0))) {
         ALOGD("Set Audio Track as Audio Source");
@@ -2853,5 +2854,120 @@ void AwesomePlayer::modifyFlags(unsigned value, FlagMode mode) {
         mStats.mFlags = mFlags;
     }
 }
+
+inline void AwesomePlayer::logFirstFrame() {
+    mStats.mFirstFrameLatencyUs = getTimeOfDayUs()-mStats.mFirstFrameLatencyStartUs;
+    mStats.mVeryFirstFrame = false;
+}
+
+inline void AwesomePlayer::logCatchUp(int64_t ts, int64_t clock, int64_t delta)
+{
+    if (mStats.mConsecutiveFramesDropped > 0) {
+        mStats.mNumTimesSyncLoss++;
+        if (mStats.mMaxTimeSyncLoss < (clock - mStats.mCatchupTimeStart) && clock > 0 && ts > 0) {
+            mStats.mMaxTimeSyncLoss = clock - mStats.mCatchupTimeStart;
+        }
+    }
+}
+
+inline void AwesomePlayer::logLate(int64_t ts, int64_t clock, int64_t delta)
+{
+    if (mStats.mMaxLateDelta < delta && clock > 0 && ts > 0) {
+        mStats.mMaxLateDelta = delta;
+    }
+}
+
+inline void AwesomePlayer::logOnTime(int64_t ts, int64_t clock, int64_t delta)
+{
+    bool needLogLate = false;
+    logCatchUp(ts, clock, delta);
+    if (delta <= 0) {
+        if ((-delta) > (-mStats.mMaxEarlyDelta) && clock > 0 && ts > 0) {
+            mStats.mMaxEarlyDelta = delta;
+        }
+    }
+    else {
+        needLogLate = true;
+    }
+
+    if(needLogLate) logLate(ts, clock, delta);
+}
+
+inline int64_t AwesomePlayer::getTimeOfDayUs() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
+
+#ifdef USE_TUNNEL_MODE
+bool AwesomePlayer::inSupportedTunnelFormats(const char * mime) {
+    const char * tunnelFormats [ ] = {
+        MEDIA_MIMETYPE_AUDIO_MPEG,
+        MEDIA_MIMETYPE_AUDIO_AAC,
+#ifdef TUNNEL_MODE_SUPPORTS_AMRWB
+        MEDIA_MIMETYPE_AUDIO_AMR_WB,
+        MEDIA_MIMETYPE_AUDIO_AMR_WB_PLUS
+#endif
+    };
+
+    if (!mime) {
+        return false;
+    }
+
+    size_t len = sizeof(tunnelFormats)/sizeof(const char *);
+    for (size_t i = 0; i < len; i++) {
+        const char * tf = tunnelFormats[i];
+        if (!strncasecmp(mime, tf, strlen(tf))) {
+            if (strlen(mime) == strlen(tf)) { //to prevent a substring match
+                ALOGD("Tunnel playback supported for %s", tf);
+                return true;
+            }
+        }
+    }
+
+    ALOGW("Tunnel playback unsupported for %s", mime);
+    return false;
+}
+
+void AwesomePlayer::checkTunnelExceptions()
+{
+    /* exception 1: No streaming */
+    if (isStreamingHTTP()) {
+        ALOGV("Streaming, force disable tunnel mode playback");
+        mIsTunnelAudio = false;
+        return;
+    }
+
+    /* below exceptions are only for av content */
+    if (mVideoTrack == NULL) return;
+
+    /* exception 2: No avi having video + mp3 */
+    if (mExtractor == NULL) return;
+
+    sp<MetaData> metaData = mExtractor->getMetaData();
+    const char * container;
+
+    /*only proceed for avi content.*/
+    if (!metaData->findCString(kKeyMIMEType, &container) ||
+        strcmp(container, MEDIA_MIMETYPE_CONTAINER_AVI)) {
+        return;
+    }
+
+    CHECK(mAudioTrack != NULL);
+
+    const char * mime;
+    metaData = mAudioTrack->getFormat();
+    /*disable for av content having mp3*/
+    if (metaData->findCString(kKeyMIMEType, &mime) &&
+        !strcmp(mime, MEDIA_MIMETYPE_AUDIO_MPEG)) {
+        ALOGV("Clip has AVI extractor and mp3 content, disable tunnel mode");
+        mIsTunnelAudio = false;
+        return;
+    }
+
+    return;
+}
+#endif
 
 }  // namespace android

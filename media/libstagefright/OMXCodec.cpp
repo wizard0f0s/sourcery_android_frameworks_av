@@ -568,6 +568,10 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
                 return err;
             }
 
+#ifdef QCOM_HARDWARE
+            QCOMXCodec::checkIfInterlaced((const uint8_t *)data, meta);
+#endif
+
             CODEC_LOGI(
                     "AVC profile = %u (%s), level = %u",
                     profile, AVCProfileToString(profile), level);
